@@ -32,10 +32,25 @@ implementation:
   container:
     image: kushagra4761/nesy-factory-gpu:t2.6v2
     command:
-      - python3
-      - -u
+      - sh
       - -c
       - |
+        # Install missing dependencies for benchmarking pipeline
+        echo "Installing benchmarking dependencies..."
+        pip install --no-cache-dir \
+          pillow>=10.0.0 \
+          diffusers>=0.25.0 \
+          safetensors>=0.4.0 \
+          torchmetrics>=1.2.0 \
+          torch-fidelity>=0.3.0 \
+          scipy>=1.11.0 \
+          --break-system-packages 2>&1 | grep -E "Successfully installed|Requirement already satisfied|ERROR" || true
+        
+        echo "Dependencies installed. Starting component..."
+        echo ""
+        
+        # Run the main Python script
+        python3 -u -c '
         import os
         import sys
         import json
@@ -46,13 +61,13 @@ implementation:
         
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )
-        logger = logging.getLogger('load_prompts')
+        logger = logging.getLogger("load_prompts")
         
         
         def ensure_directory_exists(file_path):
-            #Create directory if it doesn't exist#
+            #Create directory if it doesn'\''t exist#
             directory = os.path.dirname(file_path)
             if directory and not os.path.exists(directory):
                 os.makedirs(directory, exist_ok=True)
@@ -62,7 +77,7 @@ implementation:
         def create_prompts_from_list(prompts_string: str, max_prompts: int) -> List[str]:
             #Create prompts from comma-separated string#
             logger.info("Creating prompts from inline list")
-            prompts = [p.strip() for p in prompts_string.split(',') if p.strip()]
+            prompts = [p.strip() for p in prompts_string.split(",") if p.strip()]
             logger.info(f"Parsed {len(prompts)} prompts from list")
             return prompts[:max_prompts]
         
@@ -70,7 +85,7 @@ implementation:
         def load_prompts_from_txt(filepath: str, max_prompts: int) -> List[str]:
             #Load prompts from text file (one per line)#
             logger.info(f"Loading prompts from TXT file: {filepath}")
-            with open(filepath, 'r', encoding='utf-8') as f:
+            with open(filepath, "r", encoding="utf-8") as f:
                 prompts = [line.strip() for line in f if line.strip()]
             logger.info(f"Loaded {len(prompts)} prompts from TXT file")
             return prompts[:max_prompts]
@@ -79,7 +94,7 @@ implementation:
         def load_prompts_from_json(filepath: str, max_prompts: int, key: str = "prompts") -> List[str]:
             #Load prompts from JSON file#
             logger.info(f"Loading prompts from JSON file: {filepath}")
-            with open(filepath, 'r') as f:
+            with open(filepath, "r") as f:
                 data = json.load(f)
             
             # Try different keys
@@ -125,20 +140,20 @@ implementation:
         
         def main():
             parser = argparse.ArgumentParser(
-                description='Load or create prompts for diffusion model evaluation'
+                description="Load or create prompts for diffusion model evaluation"
             )
-            parser.add_argument('--input_path', type=str, default='',
-                               help='Path to input prompts file')
-            parser.add_argument('--prompts_list', type=str, default='',
-                               help='Comma-separated list of prompts/class labels')
-            parser.add_argument('--dataset_name', type=str, default='',
-                               help='HuggingFace dataset name')
-            parser.add_argument('--max_prompts', type=str, default='100',
-                               help='Maximum prompts to load')
-            parser.add_argument('--input_format', type=str, default='txt',
-                               help='Input format')
-            parser.add_argument('--output_prompts', required=True,
-                               help='Path to output JSON file')
+            parser.add_argument("--input_path", type=str, default="",
+                               help="Path to input prompts file")
+            parser.add_argument("--prompts_list", type=str, default="",
+                               help="Comma-separated list of prompts/class labels")
+            parser.add_argument("--dataset_name", type=str, default="",
+                               help="HuggingFace dataset name")
+            parser.add_argument("--max_prompts", type=str, default="100",
+                               help="Maximum prompts to load")
+            parser.add_argument("--input_format", type=str, default="txt",
+                               help="Input format")
+            parser.add_argument("--output_prompts", required=True,
+                               help="Path to output JSON file")
             
             args = parser.parse_args()
             
@@ -190,11 +205,11 @@ implementation:
                     if not os.path.exists(args.input_path):
                         raise FileNotFoundError(f"Input file not found: {args.input_path}")
                     
-                    if args.input_format == 'txt':
+                    if args.input_format == "txt":
                         prompts = load_prompts_from_txt(args.input_path, max_prompts)
-                    elif args.input_format == 'json':
+                    elif args.input_format == "json":
                         prompts = load_prompts_from_json(args.input_path, max_prompts)
-                    elif args.input_format == 'dataset':
+                    elif args.input_format == "dataset":
                         prompts = load_prompts_from_dataset(args.input_path, max_prompts)
                     else:
                         raise ValueError(f"Unknown format: {args.input_format}")
@@ -219,20 +234,20 @@ implementation:
                 logger.info("")
                 logger.info("Sample prompts:")
                 for i, prompt in enumerate(prompts[:5], 1):
-                    preview = str(prompt)[:80] + ('...' if len(str(prompt)) > 80 else '')
+                    preview = str(prompt)[:80] + ("..." if len(str(prompt)) > 80 else "")
                     logger.info(f"  {i}. {preview}")
                 
                 # Prepare output data
                 output_data = {
-                    'prompts': prompts,
-                    'count': len(prompts),
-                    'max_prompts': max_prompts
+                    "prompts": prompts,
+                    "count": len(prompts),
+                    "max_prompts": max_prompts
                 }
                 
                 # Save output
                 logger.info("")
                 logger.info(f"Saving to {args.output_prompts}...")
-                with open(args.output_prompts, 'w', encoding='utf-8') as f:
+                with open(args.output_prompts, "w", encoding="utf-8") as f:
                     json.dump(output_data, f, indent=2, ensure_ascii=False)
                 
                 logger.info(f"✓ Saved {len(prompts)} prompts")
@@ -264,6 +279,7 @@ implementation:
         
         if __name__ == "__main__":
             main()
+        ' "$@"
     args:
       - --input_path
       - {inputValue: input_path}
