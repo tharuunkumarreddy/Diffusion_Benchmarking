@@ -41,6 +41,7 @@ implementation:
         echo "Installing Inception Score evaluation dependencies..."
         pip install --no-cache-dir \
           torchmetrics>=1.0.0 \
+          torch-fidelity>=0.3.0 \
           scipy>=1.10.0 \
           --break-system-packages > /dev/null 2>&1
         
