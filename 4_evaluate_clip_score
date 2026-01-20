@@ -1,0 +1,237 @@
+name: Evaluate CLIP Score
+description: Calculate CLIP Score for text-to-image alignment evaluation. Higher scores indicate better alignment between text prompts and generated images. Typical good scores are >30, acceptable 20-30, poor <20.
+
+inputs:
+  - name: images
+    type: Data
+    description: 'Numpy file with generated images from Generate Images component'
+  - name: prompts
+    type: Data
+    description: 'JSON file with prompts from Load Prompts component'
+  - name: model_id
+    type: String
+    description: 'Model identifier for tracking and metadata'
+    default: 'unknown'
+  - name: clip_model
+    type: String
+    description: 'CLIP model to use for evaluation'
+    default: 'openai/clip-vit-base-patch16'
+  - name: device
+    type: String
+    description: 'Device: cuda or cpu'
+    default: 'cuda'
+
+outputs:
+  - name: result
+    type: Data
+    description: 'JSON file with CLIP Score and evaluation metadata'
+
+metadata:
+  annotations:
+    author: Evaluate CLIP Score Component
+
+implementation:
+  container:
+    image: kushagra4761/nesy-factory-gpu:t2.6v2
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "Installing benchmarking dependencies..."
+        pip install --no-cache-dir \
+          torchmetrics>=1.2.0 \
+          --break-system-packages > /dev/null 2>&1
+        
+        echo "Dependencies installed. Starting component..."
+        echo ""
+        
+        "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        def _make_parent_dirs_and_return_path(file_path):
+            import os
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            return file_path
+        
+        def evaluate_clip_score_component(
+            images_input_path,
+            prompts_input_path,
+            model_id,
+            clip_model,
+            device,
+            result_output_path,
+        ):
+            import os
+            import sys
+            import json
+            import logging
+            import numpy as np
+            import torch
+            from datetime import datetime
+            
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            logger = logging.getLogger('evaluate_clip_score')
+            
+            def ensure_directory_exists(file_path):
+                directory = os.path.dirname(file_path)
+                if directory and not os.path.exists(directory):
+                    os.makedirs(directory, exist_ok=True)
+                    logger.info(f'Created directory: {directory}')
+            
+            def calculate_clip_score(images, prompts, clip_model_name, dev):
+                """Calculate CLIP Score"""
+                from torchmetrics.functional.multimodal import clip_score
+                from functools import partial
+                
+                logger.info('Setting up CLIP Score metric')
+                logger.info(f'  Model: {clip_model_name}')
+                logger.info(f'  Device: {dev}')
+                
+                clip_score_fn = partial(clip_score, model_name_or_path=clip_model_name)
+                
+                # Prepare images: convert to uint8 and NCHW format
+                logger.info(f'Preparing {len(images)} images...')
+                images_int = (images * 255).astype('uint8')
+                images_tensor = torch.from_numpy(images_int).permute(0, 3, 1, 2)
+                
+                logger.info('Computing CLIP Score...')
+                score = clip_score_fn(images_tensor, prompts).detach()
+                
+                return float(score)
+            
+            logger.info('='*80)
+            logger.info('EVALUATE CLIP SCORE COMPONENT')
+            logger.info('='*80)
+            logger.info(f'Images: {images_input_path}')
+            logger.info(f'Prompts: {prompts_input_path}')
+            logger.info(f'Model ID: {model_id}')
+            logger.info(f'CLIP Model: {clip_model}')
+            logger.info(f'Device: {device}')
+            logger.info('')
+            
+            try:
+                ensure_directory_exists(result_output_path)
+                
+                # Validate inputs
+                if not os.path.exists(images_input_path):
+                    raise FileNotFoundError(f'Images file not found: {images_input_path}')
+                
+                if not os.path.exists(prompts_input_path):
+                    raise FileNotFoundError(f'Prompts file not found: {prompts_input_path}')
+                
+                # Load images
+                logger.info(f'Loading images from {images_input_path}...')
+                images = np.load(images_input_path)
+                logger.info(f'✓ Loaded {len(images)} images with shape {images.shape}')
+                
+                # Ensure images in [0, 1] range
+                if images.max() > 1.0:
+                    images = images / 255.0
+                    logger.info('  Normalized images to [0, 1] range')
+                
+                # Load prompts
+                logger.info(f'Loading prompts from {prompts_input_path}...')
+                with open(prompts_input_path, 'r') as f:
+                    prompts_data = json.load(f)
+                
+                prompts = prompts_data['prompts'] if isinstance(prompts_data, dict) else prompts_data
+                logger.info(f'✓ Loaded {len(prompts)} prompts')
+                
+                # Validate counts match
+                if len(images) != len(prompts):
+                    logger.warning(f'Image count ({len(images)}) != prompt count ({len(prompts)})')
+                    min_count = min(len(images), len(prompts))
+                    images = images[:min_count]
+                    prompts = prompts[:min_count]
+                    logger.warning(f'  Using first {min_count} samples')
+                
+                # Evaluate CLIP Score
+                logger.info('')
+                logger.info('Evaluating CLIP Score...')
+                score = calculate_clip_score(images, prompts, clip_model, device)
+                
+                logger.info('')
+                logger.info('='*80)
+                logger.info(f'CLIP Score: {score:.4f}')
+                logger.info('='*80)
+                logger.info('')
+                logger.info('Interpretation:')
+                logger.info('  > 30: Good alignment')
+                logger.info('  20-30: Acceptable')
+                logger.info('  < 20: Poor alignment')
+                logger.info('')
+                
+                # Save result
+                result = {
+                    'metric_name': 'clip_score',
+                    'metric_value': score,
+                    'model_id': model_id,
+                    'num_samples': len(images),
+                    'clip_model': clip_model,
+                    'timestamp': datetime.now().isoformat(),
+                    'metadata': {
+                        'image_shape': list(images.shape),
+                        'device': device
+                    }
+                }
+                
+                with open(result_output_path, 'w') as f:
+                    json.dump(result, f, indent=2)
+                
+                logger.info(f'✓ Saved result to {result_output_path}')
+                
+                logger.info('')
+                logger.info('='*80)
+                logger.info('CLIP SCORE EVALUATION COMPLETED')
+                logger.info('='*80)
+                logger.info(f'Score: {score:.4f}')
+                logger.info(f'Samples: {len(images)}')
+                logger.info(f'Model: {model_id}')
+                logger.info('='*80)
+                
+            except FileNotFoundError as e:
+                logger.error(f'FILE NOT FOUND ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except ValueError as e:
+                logger.error(f'VALIDATION ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except Exception as e:
+                logger.error(f'ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+        
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Evaluate CLIP Score', description='Calculate CLIP Score for text-to-image alignment')
+        _parser.add_argument('--images', dest='images_input_path', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--prompts', dest='prompts_input_path', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--model_id', dest='model_id', type=str, required=False, default='unknown')
+        _parser.add_argument('--clip_model', dest='clip_model', type=str, required=False, default='openai/clip-vit-base-patch16')
+        _parser.add_argument('--device', dest='device', type=str, required=False, default='cuda')
+        _parser.add_argument('--output_result', dest='result_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parsed_args = vars(_parser.parse_args())
+        evaluate_clip_score_component(**_parsed_args)
+
+    args:
+      - --images
+      - {inputPath: images}
+      - --prompts
+      - {inputPath: prompts}
+      - --model_id
+      - {inputValue: model_id}
+      - --clip_model
+      - {inputValue: clip_model}
+      - --device
+      - {inputValue: device}
+      - --output_result
+      - {outputPath: result}
