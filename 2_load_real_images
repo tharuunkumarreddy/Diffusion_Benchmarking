@@ -1,0 +1,349 @@
+name: Load Real Images for Diffusion Evaluation
+description: Load real images from local directory or download from HuggingFace datasets. Supports zip extraction, direct directory loading, and proper preprocessing with center crop (HuggingFace standard) or resize methods for FID evaluation.
+
+inputs:
+  - name: images_dir
+    type: String
+    description: 'Directory with real images (local, optional if using dataset_url)'
+    default: ''
+  - name: dataset_url
+    type: String
+    description: 'HuggingFace dataset URL (downloads and extracts zip file)'
+    default: ''
+  - name: max_images
+    type: String
+    description: 'Maximum number of images to load'
+    default: '1000'
+  - name: image_size
+    type: String
+    description: 'Target size as "height,width" (e.g., "256,256" or "512,512")'
+    default: '512,512'
+  - name: use_center_crop
+    type: String
+    description: 'Use center crop (true) or resize (false). Center crop is HuggingFace standard for FID.'
+    default: 'true'
+
+outputs:
+  - name: images
+    type: Data
+    description: 'Numpy file with preprocessed images (.npy format)'
+  - name: metadata
+    type: Data
+    description: 'JSON file with loading metadata and statistics'
+
+metadata:
+  annotations:
+    author: Load Real Images Component
+
+implementation:
+  container:
+    image: kushagra4761/nesy-factory-gpu:t2.6v2
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "Installing benchmarking dependencies..."
+        pip install --no-cache-dir \
+          pillow>=10.0.0 \
+          requests>=2.31.0 \
+          --break-system-packages > /dev/null 2>&1
+        
+        echo "Dependencies installed. Starting component..."
+        echo ""
+        
+        "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        def _make_parent_dirs_and_return_path(file_path):
+            import os
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            return file_path
+        
+        def load_real_images_component(
+            images_dir,
+            dataset_url,
+            max_images,
+            image_size,
+            use_center_crop,
+            images_output_path,
+            metadata_output_path,
+        ):
+            import os
+            import sys
+            import json
+            import logging
+            import numpy as np
+            from pathlib import Path
+            from PIL import Image
+            import torch
+            from torchvision.transforms import functional as F
+            
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            logger = logging.getLogger('load_real_images')
+            
+            def ensure_directory_exists(file_path):
+                directory = os.path.dirname(file_path)
+                if directory and not os.path.exists(directory):
+                    os.makedirs(directory, exist_ok=True)
+                    logger.info(f'Created directory: {directory}')
+            
+            def download_and_extract_dataset(url: str, extract_dir: str = ".") -> str:
+                #Download and extract dataset from URL#
+                from zipfile import ZipFile
+                import requests
+                
+                logger.info(f"Downloading dataset from: {url}")
+                
+                # Download
+                local_filename = url.split("/")[-1]
+                logger.info(f"  Saving to: {local_filename}")
+                
+                response = requests.get(url, stream=True)
+                total_size = int(response.headers.get('content-length', 0))
+                
+                with open(local_filename, 'wb') as f:
+                    if total_size > 0:
+                        downloaded = 0
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            percent = (downloaded / total_size) * 100
+                            if downloaded % (1024 * 1024 * 10) == 0:  # Log every 10MB
+                                logger.info(f"  Progress: {percent:.1f}%")
+                        logger.info(f"  Progress: 100.0%")
+                    else:
+                        f.write(response.content)
+                
+                logger.info(f"✓ Download complete")
+                
+                # Extract if zip file
+                if local_filename.endswith('.zip'):
+                    logger.info(f"Extracting {local_filename}...")
+                    with ZipFile(local_filename, 'r') as zipper:
+                        zip_contents = zipper.namelist()
+                        logger.info(f"  Found {len(zip_contents)} files in zip")
+                        zipper.extractall(extract_dir)
+                    logger.info(f"✓ Extraction complete")
+                    
+                    # Find the directory containing images
+                    if zip_contents:
+                        first_item = zip_contents[0]
+                        if '/' in first_item or '\\' in first_item:
+                            top_dir = first_item.split('/')[0].split('\\')[0]
+                            result_path = os.path.join(extract_dir, top_dir)
+                            
+                            if os.path.isdir(result_path):
+                                files_in_dir = os.listdir(result_path)
+                                image_extensions = ['.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG']
+                                has_images = any(
+                                    any(f.endswith(ext) for ext in image_extensions)
+                                    for f in files_in_dir
+                                )
+                                if has_images:
+                                    return result_path
+                    
+                    # Look for newly created directories with images
+                    for item in os.listdir(extract_dir):
+                        item_path = os.path.join(extract_dir, item)
+                        if os.path.isdir(item_path) and item != '__pycache__':
+                            try:
+                                files = os.listdir(item_path)
+                                image_extensions = ['.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG']
+                                has_images = any(
+                                    any(f.endswith(ext) for ext in image_extensions)
+                                    for f in files
+                                )
+                                if has_images:
+                                    return item_path
+                            except:
+                                continue
+                    
+                    return extract_dir
+                
+                return extract_dir
+            
+            def load_images_from_directory(directory: str, max_imgs: int, img_size: tuple, use_crop: bool) -> np.ndarray:
+                #Load and preprocess images from directory#
+                dir_path = Path(directory)
+                
+                # Find all image files
+                extensions = ['.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG']
+                image_files = []
+                for ext in extensions:
+                    image_files.extend(dir_path.glob(f"*{ext}"))
+                
+                image_files = sorted(image_files)[:max_imgs]
+                
+                if not image_files:
+                    raise ValueError(f"No images found in {directory}")
+                
+                logger.info(f"Found {len(image_files)} images")
+                logger.info(f"Preprocessing method: {'CENTER CROP' if use_crop else 'RESIZE'}")
+                
+                # Load images
+                images = []
+                failed = 0
+                
+                for i, img_path in enumerate(image_files):
+                    try:
+                        img = Image.open(img_path).convert('RGB')
+                        img_array = np.array(img)
+                        
+                        if use_crop:
+                            # HuggingFace reference method: center crop
+                            img_tensor = torch.tensor(img_array).unsqueeze(0)
+                            img_tensor = img_tensor.permute(0, 3, 1, 2).float() / 255.0
+                            img_tensor = F.center_crop(img_tensor, img_size)
+                            img_processed = img_tensor.squeeze(0).permute(1, 2, 0).numpy()
+                            images.append(img_processed)
+                        else:
+                            # Alternative method: resize
+                            if img_size:
+                                img = img.resize((img_size[1], img_size[0]))
+                            images.append(np.array(img))
+                        
+                        if (i + 1) % 100 == 0:
+                            logger.info(f"  Loaded {i + 1}/{len(image_files)} images")
+                    except Exception as e:
+                        logger.warning(f"  Failed to load {img_path.name}: {e}")
+                        failed += 1
+                
+                if not images:
+                    raise ValueError("No images could be loaded successfully")
+                
+                if failed > 0:
+                    logger.warning(f"  Failed to load {failed} images")
+                
+                # Stack images
+                if use_crop:
+                    images_array = np.stack(images, axis=0).astype(np.float32)
+                    logger.info(f"  Image range: [{images_array.min():.4f}, {images_array.max():.4f}]")
+                else:
+                    images_array = np.array(images, dtype=np.uint8)
+                
+                return images_array
+            
+            # Parse parameters
+            max_imgs = int(max_images)
+            height, width = map(int, image_size.split(','))
+            img_size = (height, width)
+            use_crop = use_center_crop.lower() in ['true', '1', 'yes']
+            
+            logger.info('='*80)
+            logger.info('LOAD REAL IMAGES COMPONENT')
+            logger.info('='*80)
+            logger.info(f'Max images: {max_imgs}')
+            logger.info(f'Image size: {img_size}')
+            logger.info(f'Preprocessing: {"CENTER CROP" if use_crop else "RESIZE"}')
+            logger.info('')
+            
+            try:
+                ensure_directory_exists(images_output_path)
+                ensure_directory_exists(metadata_output_path)
+                
+                # Determine source: URL or local directory
+                if dataset_url and dataset_url.strip():
+                    logger.info('Mode: Download from HuggingFace')
+                    logger.info(f'URL: {dataset_url}')
+                    logger.info('')
+                    
+                    images_dir = download_and_extract_dataset(dataset_url)
+                    logger.info(f'✓ Dataset ready at: {images_dir}')
+                    logger.info('')
+                
+                elif images_dir and images_dir.strip():
+                    logger.info('Mode: Load from local directory')
+                    logger.info(f'Directory: {images_dir}')
+                    logger.info('')
+                
+                else:
+                    raise ValueError('Must provide either images_dir or dataset_url')
+                
+                # Validate directory exists
+                if not os.path.exists(images_dir):
+                    raise FileNotFoundError(f'Directory not found: {images_dir}')
+                
+                # Load images
+                logger.info(f'Loading images from {images_dir}...')
+                images = load_images_from_directory(images_dir, max_imgs, img_size, use_crop)
+                logger.info(f'✓ Loaded {len(images)} images with shape {images.shape}')
+                
+                # Save images
+                logger.info('')
+                logger.info(f'Saving images to {images_output_path}...')
+                np.save(images_output_path, images)
+                logger.info(f'✓ Saved numpy array: {images.shape}')
+                
+                # Save metadata
+                metadata = {
+                    'num_images': len(images),
+                    'image_shape': list(images.shape),
+                    'source_dir': images_dir,
+                    'source_url': dataset_url if dataset_url and dataset_url.strip() else None,
+                    'target_size': list(img_size),
+                    'preprocessing': 'center_crop' if use_crop else 'resize',
+                    'dtype': str(images.dtype)
+                }
+                
+                with open(metadata_output_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                logger.info(f'✓ Saved metadata to {metadata_output_path}')
+                
+                logger.info('')
+                logger.info('='*80)
+                logger.info('REAL IMAGES LOADING COMPLETED')
+                logger.info('='*80)
+                logger.info(f'Total images: {len(images)}')
+                logger.info(f'Shape: {images.shape}')
+                logger.info(f'Dtype: {images.dtype}')
+                logger.info('='*80)
+                
+            except FileNotFoundError as e:
+                logger.error(f'FILE NOT FOUND ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except ValueError as e:
+                logger.error(f'VALIDATION ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except Exception as e:
+                logger.error(f'ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+        
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Load Real Images for Diffusion Evaluation', description='Load and preprocess real images for FID evaluation')
+        _parser.add_argument('--images_dir', dest='images_dir', type=str, required=False, default='')
+        _parser.add_argument('--dataset_url', dest='dataset_url', type=str, required=False, default='')
+        _parser.add_argument('--max_images', dest='max_images', type=str, required=False, default='1000')
+        _parser.add_argument('--image_size', dest='image_size', type=str, required=False, default='512,512')
+        _parser.add_argument('--use_center_crop', dest='use_center_crop', type=str, required=False, default='true')
+        _parser.add_argument('--output_images', dest='images_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--output_metadata', dest='metadata_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parsed_args = vars(_parser.parse_args())
+        load_real_images_component(**_parsed_args)
+
+    args:
+      - --images_dir
+      - {inputValue: images_dir}
+      - --dataset_url
+      - {inputValue: dataset_url}
+      - --max_images
+      - {inputValue: max_images}
+      - --image_size
+      - {inputValue: image_size}
+      - --use_center_crop
+      - {inputValue: use_center_crop}
+      - --output_images
+      - {outputPath: images}
+      - --output_metadata
+      - {outputPath: metadata}
