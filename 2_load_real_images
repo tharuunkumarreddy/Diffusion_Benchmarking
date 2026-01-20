@@ -93,8 +93,8 @@ implementation:
                     os.makedirs(directory, exist_ok=True)
                     logger.info(f'Created directory: {directory}')
             
-            def download_and_extract_dataset(url: str, extract_dir: str = ".") -> str:
-                #Download and extract dataset from URL#
+            def download_and_extract_dataset(url, extract_dir="."):
+                """Download and extract dataset from URL"""
                 from zipfile import ZipFile
                 import requests
                 
@@ -114,7 +114,7 @@ implementation:
                             f.write(chunk)
                             downloaded += len(chunk)
                             percent = (downloaded / total_size) * 100
-                            if downloaded % (1024 * 1024 * 10) == 0:  # Log every 10MB
+                            if downloaded % (1024 * 1024 * 10) == 0:
                                 logger.info(f"  Progress: {percent:.1f}%")
                         logger.info(f"  Progress: 100.0%")
                     else:
@@ -134,8 +134,8 @@ implementation:
                     # Find the directory containing images
                     if zip_contents:
                         first_item = zip_contents[0]
-                        if '/' in first_item or '\\' in first_item:
-                            top_dir = first_item.split('/')[0].split('\\')[0]
+                        if '/' in first_item or '\\\\' in first_item:
+                            top_dir = first_item.split('/')[0].split('\\\\')[0]
                             result_path = os.path.join(extract_dir, top_dir)
                             
                             if os.path.isdir(result_path):
@@ -168,8 +168,8 @@ implementation:
                 
                 return extract_dir
             
-            def load_images_from_directory(directory: str, max_imgs: int, img_size: tuple, use_crop: bool) -> np.ndarray:
-                #Load and preprocess images from directory#
+            def load_images_from_directory(directory, max_imgs, img_size, use_crop):
+                """Load and preprocess images from directory"""
                 dir_path = Path(directory)
                 
                 # Find all image files
