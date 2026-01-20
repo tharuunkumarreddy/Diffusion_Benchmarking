@@ -1,0 +1,303 @@
+name: Generate Images with Diffusion Models
+description: Generate images using diffusion models (Stable Diffusion or DiT). Supports text-to-image and class-conditional generation with configurable inference steps, guidance scale, and random seed for reproducibility.
+
+inputs:
+  - name: prompts
+    type: Data
+    description: 'JSON file with prompts from Load Prompts component'
+  - name: model_id
+    type: String
+    description: 'HuggingFace model ID (e.g., "CompVis/stable-diffusion-v1-4", "facebook/DiT-XL-2-256")'
+  - name: pipeline_type
+    type: String
+    description: 'Pipeline type: text2img or class_conditional'
+    default: 'text2img'
+  - name: num_inference_steps
+    type: String
+    description: 'Number of denoising steps'
+    default: '50'
+  - name: guidance_scale
+    type: String
+    description: 'Classifier-free guidance scale (only for text2img)'
+    default: '7.5'
+  - name: seed
+    type: String
+    description: 'Random seed for reproducibility'
+    default: '42'
+  - name: device
+    type: String
+    description: 'Device: cuda or cpu'
+    default: 'cuda'
+  - name: dtype
+    type: String
+    description: 'Data type: float16 or float32'
+    default: 'float16'
+
+outputs:
+  - name: images
+    type: Data
+    description: 'Numpy file with generated images (.npy format)'
+  - name: metadata
+    type: Data
+    description: 'JSON file with generation metadata and parameters'
+
+metadata:
+  annotations:
+    author: Generate Images Component
+
+implementation:
+  container:
+    image: kushagra4761/nesy-factory-gpu:t2.6v2
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "Installing benchmarking dependencies..."
+        pip install --no-cache-dir \
+          pillow>=10.0.0 \
+          diffusers>=0.25.0 \
+          safetensors>=0.4.0 \
+          --break-system-packages > /dev/null 2>&1
+        
+        echo "Dependencies installed. Starting component..."
+        echo ""
+        
+        "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        def _make_parent_dirs_and_return_path(file_path):
+            import os
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            return file_path
+        
+        def generate_images_component(
+            prompts_input_path,
+            model_id,
+            pipeline_type,
+            num_inference_steps,
+            guidance_scale,
+            seed,
+            device,
+            dtype,
+            images_output_path,
+            metadata_output_path,
+        ):
+            import os
+            import sys
+            import json
+            import logging
+            import numpy as np
+            import torch
+            
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            logger = logging.getLogger('generate_images')
+            
+            def ensure_directory_exists(file_path):
+                directory = os.path.dirname(file_path)
+                if directory and not os.path.exists(directory):
+                    os.makedirs(directory, exist_ok=True)
+                    logger.info(f'Created directory: {directory}')
+            
+            def generate_text2img(model_id, prompts, num_steps, guide_scale, seed_val, dev, dt):
+                #Generate images from text prompts#
+                from diffusers import StableDiffusionPipeline
+                
+                torch_dtype = torch.float16 if dt == 'float16' else torch.float32
+                
+                logger.info(f'Loading Stable Diffusion pipeline: {model_id}')
+                pipeline = StableDiffusionPipeline.from_pretrained(
+                    model_id,
+                    torch_dtype=torch_dtype
+                ).to(dev)
+                
+                if dev == 'cuda':
+                    try:
+                        pipeline.enable_attention_slicing()
+                        logger.info('✓ Enabled attention slicing (memory optimization)')
+                    except:
+                        pass
+                
+                logger.info(f'Generating {len(prompts)} images...')
+                generator = torch.manual_seed(seed_val)
+                
+                images = pipeline(
+                    prompts,
+                    num_inference_steps=num_steps,
+                    guidance_scale=guide_scale,
+                    generator=generator,
+                    output_type='numpy'
+                ).images
+                
+                return images
+            
+            def generate_class_conditional(model_id, class_labels, num_steps, seed_val, dev, dt):
+                #Generate images from class labels (DiT models)#
+                from diffusers import DiTPipeline, DPMSolverMultistepScheduler
+                
+                torch_dtype = torch.float16 if dt == 'float16' else torch.float32
+                
+                logger.info(f'Loading DiT pipeline: {model_id}')
+                pipeline = DiTPipeline.from_pretrained(model_id, torch_dtype=torch_dtype)
+                pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config)
+                pipeline = pipeline.to(dev)
+                
+                logger.info(f'Generating {len(class_labels)} images...')
+                generator = torch.manual_seed(seed_val)
+                
+                class_ids = pipeline.get_label_ids(class_labels)
+                output = pipeline(
+                    class_labels=class_ids,
+                    num_inference_steps=num_steps,
+                    generator=generator,
+                    output_type='numpy'
+                )
+                
+                return output.images
+            
+            # Parse parameters
+            num_steps = int(num_inference_steps)
+            guide_scale = float(guidance_scale)
+            seed_val = int(seed)
+            
+            logger.info('='*80)
+            logger.info('GENERATE IMAGES COMPONENT')
+            logger.info('='*80)
+            logger.info(f'Model: {model_id}')
+            logger.info(f'Pipeline: {pipeline_type}')
+            logger.info(f'Prompts: {prompts_input_path}')
+            logger.info(f'Steps: {num_steps}')
+            logger.info(f'Guidance: {guide_scale}')
+            logger.info(f'Seed: {seed_val}')
+            logger.info(f'Device: {device}')
+            logger.info(f'Dtype: {dtype}')
+            logger.info('')
+            
+            try:
+                ensure_directory_exists(images_output_path)
+                ensure_directory_exists(metadata_output_path)
+                
+                # Validate model ID
+                if not model_id or model_id.strip() == '':
+                    raise ValueError('Model ID not provided!')
+                
+                # Validate prompts file
+                if not os.path.exists(prompts_input_path):
+                    raise FileNotFoundError(f'Prompts file not found: {prompts_input_path}')
+                
+                # Load prompts
+                logger.info(f'Loading prompts from {prompts_input_path}...')
+                with open(prompts_input_path, 'r') as f:
+                    prompts_data = json.load(f)
+                
+                prompts = prompts_data['prompts'] if isinstance(prompts_data, dict) else prompts_data
+                logger.info(f'✓ Loaded {len(prompts)} prompts')
+                
+                # Validate pipeline type
+                if pipeline_type not in ['text2img', 'class_conditional']:
+                    raise ValueError(f'Unknown pipeline type: {pipeline_type}')
+                
+                # Generate images
+                logger.info('')
+                logger.info('Generating images...')
+                
+                if pipeline_type == 'text2img':
+                    images = generate_text2img(
+                        model_id, prompts, num_steps, guide_scale, seed_val, device, dtype
+                    )
+                elif pipeline_type == 'class_conditional':
+                    images = generate_class_conditional(
+                        model_id, prompts, num_steps, seed_val, device, dtype
+                    )
+                
+                logger.info(f'✓ Generated {len(images)} images with shape {images.shape}')
+                
+                # Save images
+                logger.info('')
+                logger.info(f'Saving images to {images_output_path}...')
+                np.save(images_output_path, images)
+                logger.info(f'✓ Saved numpy array: {images.shape}')
+                
+                # Save metadata
+                metadata = {
+                    'model_id': model_id,
+                    'pipeline_type': pipeline_type,
+                    'num_images': len(images),
+                    'image_shape': list(images.shape),
+                    'num_inference_steps': num_steps,
+                    'guidance_scale': guide_scale,
+                    'seed': seed_val,
+                    'device': device,
+                    'dtype': dtype
+                }
+                
+                with open(metadata_output_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                logger.info(f'✓ Saved metadata to {metadata_output_path}')
+                
+                logger.info('')
+                logger.info('='*80)
+                logger.info('IMAGE GENERATION COMPLETED')
+                logger.info('='*80)
+                logger.info(f'Total images: {len(images)}')
+                logger.info(f'Shape: {images.shape}')
+                logger.info(f'Model: {model_id}')
+                logger.info('='*80)
+                
+            except FileNotFoundError as e:
+                logger.error(f'FILE NOT FOUND ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except ValueError as e:
+                logger.error(f'VALIDATION ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except Exception as e:
+                logger.error(f'ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+        
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Generate Images with Diffusion Models', description='Generate images using text2img or class-conditional diffusion models')
+        _parser.add_argument('--prompts', dest='prompts_input_path', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--model_id', dest='model_id', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--pipeline_type', dest='pipeline_type', type=str, required=False, default='text2img')
+        _parser.add_argument('--num_inference_steps', dest='num_inference_steps', type=str, required=False, default='50')
+        _parser.add_argument('--guidance_scale', dest='guidance_scale', type=str, required=False, default='7.5')
+        _parser.add_argument('--seed', dest='seed', type=str, required=False, default='42')
+        _parser.add_argument('--device', dest='device', type=str, required=False, default='cuda')
+        _parser.add_argument('--dtype', dest='dtype', type=str, required=False, default='float16')
+        _parser.add_argument('--output_images', dest='images_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--output_metadata', dest='metadata_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parsed_args = vars(_parser.parse_args())
+        generate_images_component(**_parsed_args)
+
+    args:
+      - --prompts
+      - {inputPath: prompts}
+      - --model_id
+      - {inputValue: model_id}
+      - --pipeline_type
+      - {inputValue: pipeline_type}
+      - --num_inference_steps
+      - {inputValue: num_inference_steps}
+      - --guidance_scale
+      - {inputValue: guidance_scale}
+      - --seed
+      - {inputValue: seed}
+      - --device
+      - {inputValue: device}
+      - --dtype
+      - {inputValue: dtype}
+      - --output_images
+      - {outputPath: images}
+      - --output_metadata
+      - {outputPath: metadata}
