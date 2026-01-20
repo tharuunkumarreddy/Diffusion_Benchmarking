@@ -85,7 +85,7 @@ implementation:
                     logger.info(f'Created directory: {directory}')
             
             def calculate_clip_score(images, prompts, clip_model_name, dev):
-                """Calculate CLIP Score"""
+                #Calculate CLIP Score#
                 from torchmetrics.functional.multimodal import clip_score
                 from functools import partial
                 
