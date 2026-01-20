@@ -85,19 +85,14 @@ implementation:
                     logger.info(f'Created directory: {directory}')
             
             def calculate_fid(real_imgs, fake_imgs, apply_normalize, dev):
-                """
-                Calculate FID score
-                
-                Args:
-                    real_imgs: numpy array in [0, 1] range
-                    fake_imgs: numpy array in [0, 1] range
-                    apply_normalize: Apply Inception normalization (mean/std)
-                    dev: cuda or cpu
-                
-                Note: 
-                    Images must be in [0, 1] range before calling this function.
-                    The normalize parameter controls Inception-specific normalization.
-                """
+                # Calculate FID score
+                # Args:
+                #   real_imgs: numpy array in [0, 1] range
+                #   fake_imgs: numpy array in [0, 1] range
+                #   apply_normalize: Apply Inception normalization (mean/std)
+                #   dev: cuda or cpu
+                # Note: Images must be in [0, 1] range before calling this function.
+                #       The normalize parameter controls Inception-specific normalization.
                 from torchmetrics.image.fid import FrechetInceptionDistance
                 
                 logger.info('Setting up FID metric')
