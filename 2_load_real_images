@@ -94,7 +94,7 @@ implementation:
                     logger.info(f'Created directory: {directory}')
             
             def download_and_extract_dataset(url, extract_dir="."):
-                """Download and extract dataset from URL"""
+                #Download and extract dataset from URL#
                 from zipfile import ZipFile
                 import requests
                 
@@ -169,7 +169,7 @@ implementation:
                 return extract_dir
             
             def load_images_from_directory(directory, max_imgs, img_size, use_crop):
-                """Load and preprocess images from directory"""
+                #Load and preprocess images from directory#
                 dir_path = Path(directory)
                 
                 # Find all image files
