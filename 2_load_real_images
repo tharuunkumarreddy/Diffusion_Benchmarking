@@ -76,6 +76,7 @@ implementation:
             import json
             import logging
             import numpy as np
+            import shutil
             from pathlib import Path
             from PIL import Image
             import torch
@@ -94,7 +95,7 @@ implementation:
                     logger.info(f'Created directory: {directory}')
             
             def download_and_extract_dataset(url, extract_dir="."):
-                #Download and extract dataset from URL#
+                """Download and extract dataset from URL"""
                 from zipfile import ZipFile
                 import requests
                 
@@ -169,7 +170,7 @@ implementation:
                 return extract_dir
             
             def load_images_from_directory(directory, max_imgs, img_size, use_crop):
-                #Load and preprocess images from directory#
+                """Load and preprocess images from directory"""
                 dir_path = Path(directory)
                 
                 # Find all image files
@@ -274,11 +275,18 @@ implementation:
                 images = load_images_from_directory(images_dir, max_imgs, img_size, use_crop)
                 logger.info(f'✓ Loaded {len(images)} images with shape {images.shape}')
                 
-                # Save images
+                # Save images - np.save adds .npy automatically, then we need to rename
                 logger.info('')
                 logger.info(f'Saving images to {images_output_path}...')
                 np.save(images_output_path, images)
-                logger.info(f'✓ Saved numpy array: {images.shape}')
+                
+                # np.save automatically adds .npy extension, so rename it
+                npy_path = images_output_path + '.npy'
+                if os.path.exists(npy_path) and npy_path != images_output_path:
+                    shutil.move(npy_path, images_output_path)
+                    logger.info(f'✓ Saved numpy array: {images.shape}')
+                else:
+                    logger.info(f'✓ Saved numpy array: {images.shape}')
                 
                 # Save metadata
                 metadata = {
