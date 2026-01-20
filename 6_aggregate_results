@@ -1,0 +1,220 @@
+name: Aggregate Evaluation Results
+description: Combine evaluation results from multiple metrics (FID, Inception Score, CLIP Score, etc.) into a single aggregated report. Produces a comprehensive summary JSON with all metric values and metadata.
+
+inputs:
+  - name: fid_result
+    type: Data
+    description: 'JSON file with FID score results (optional)'
+    optional: true
+  - name: inception_result
+    type: Data
+    description: 'JSON file with Inception Score results (optional)'
+    optional: true
+  - name: clip_result
+    type: Data
+    description: 'JSON file with CLIP Score results (optional)'
+    optional: true
+  - name: model_name
+    type: String
+    description: 'Model name for reporting (e.g., "stable-diffusion-v1-4")'
+    default: 'diffusion_model'
+
+outputs:
+  - name: aggregated_results
+    type: Data
+    description: 'JSON file with aggregated results from all metrics'
+
+metadata:
+  annotations:
+    author: Aggregate Results Component
+
+implementation:
+  container:
+    image: kushagra4761/nesy-factory-gpu:t2.6v2
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "Starting aggregation component..."
+        echo ""
+        
+        "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        def _make_parent_dirs_and_return_path(file_path):
+            import os
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            return file_path
+        
+        def aggregate_results_component(
+            fid_result_input_path,
+            inception_result_input_path,
+            clip_result_input_path,
+            model_name,
+            aggregated_results_output_path,
+        ):
+            import os
+            import sys
+            import json
+            import logging
+            from datetime import datetime
+            
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            logger = logging.getLogger('aggregate_results')
+            
+            def ensure_directory_exists(file_path):
+                directory = os.path.dirname(file_path)
+                if directory and not os.path.exists(directory):
+                    os.makedirs(directory, exist_ok=True)
+                    logger.info(f'Created directory: {directory}')
+            
+            def load_result_file(filepath):
+                # Load a single result JSON file
+                # Returns: dict with metric data or None if file doesn't exist
+                if not filepath or not os.path.exists(filepath):
+                    return None
+                
+                try:
+                    with open(filepath, 'r') as f:
+                        result = json.load(f)
+                    logger.info(f'  ✓ {result["metric_name"]}: {result["metric_value"]:.4f}')
+                    return result
+                except Exception as e:
+                    logger.warning(f'  Failed to load {filepath}: {e}')
+                    return None
+            
+            def aggregate_metrics(results):
+                # Aggregate multiple metric results into a single dict
+                # Args:
+                #   results: list of result dicts
+                # Returns:
+                #   aggregated dict with all metrics
+                aggregated = {
+                    'metrics': {},
+                    'num_metrics': len(results)
+                }
+                
+                for result in results:
+                    metric_name = result['metric_name']
+                    metric_entry = {
+                        'value': result['metric_value'],
+                        'model_id': result.get('model_id', 'unknown'),
+                        'timestamp': result.get('timestamp'),
+                        'metadata': result.get('metadata', {})
+                    }
+                    
+                    # Include std if available (for Inception Score)
+                    if 'std' in result:
+                        metric_entry['std'] = result['std']
+                    
+                    aggregated['metrics'][metric_name] = metric_entry
+                
+                return aggregated
+            
+            logger.info('='*80)
+            logger.info('AGGREGATE EVALUATION RESULTS COMPONENT')
+            logger.info('='*80)
+            logger.info(f'Model: {model_name}')
+            logger.info('')
+            
+            try:
+                ensure_directory_exists(aggregated_results_output_path)
+                
+                # Collect all result file paths
+                result_paths = {
+                    'FID': fid_result_input_path,
+                    'Inception Score': inception_result_input_path,
+                    'CLIP Score': clip_result_input_path,
+                }
+                
+                # Load all available results
+                logger.info('Loading result files:')
+                results = []
+                
+                for metric_type, filepath in result_paths.items():
+                    if filepath and filepath.strip():
+                        result = load_result_file(filepath)
+                        if result:
+                            results.append(result)
+                
+                if not results:
+                    raise ValueError('No valid result files could be loaded!')
+                
+                logger.info(f'✓ Loaded {len(results)} results')
+                logger.info('')
+                
+                # Aggregate results
+                logger.info('Aggregating results...')
+                aggregated = aggregate_metrics(results)
+                aggregated['model_name'] = model_name
+                aggregated['timestamp'] = datetime.now().isoformat()
+                
+                # Print summary
+                logger.info('')
+                logger.info('='*80)
+                logger.info(f'Evaluation Summary for {model_name}')
+                logger.info('='*80)
+                
+                for metric_name, metric_data in aggregated['metrics'].items():
+                    value = metric_data['value']
+                    if 'std' in metric_data:
+                        std = metric_data['std']
+                        logger.info(f'{metric_name:20s}: {value:.4f} ± {std:.4f}')
+                    else:
+                        logger.info(f'{metric_name:20s}: {value:.4f}')
+                
+                logger.info('='*80)
+                logger.info('')
+                
+                # Save aggregated results
+                with open(aggregated_results_output_path, 'w') as f:
+                    json.dump(aggregated, f, indent=2)
+                
+                logger.info(f'✓ Saved aggregated results to {aggregated_results_output_path}')
+                
+                logger.info('')
+                logger.info('='*80)
+                logger.info('AGGREGATION COMPLETED')
+                logger.info('='*80)
+                logger.info(f'Total metrics: {len(results)}')
+                logger.info(f'Model: {model_name}')
+                logger.info('='*80)
+                
+            except ValueError as e:
+                logger.error(f'VALIDATION ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except Exception as e:
+                logger.error(f'ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+        
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Aggregate Evaluation Results', description='Combine evaluation results from multiple metrics')
+        _parser.add_argument('--fid_result', dest='fid_result_input_path', type=str, required=False, default='')
+        _parser.add_argument('--inception_result', dest='inception_result_input_path', type=str, required=False, default='')
+        _parser.add_argument('--clip_result', dest='clip_result_input_path', type=str, required=False, default='')
+        _parser.add_argument('--model_name', dest='model_name', type=str, required=False, default='diffusion_model')
+        _parser.add_argument('--output_aggregated_results', dest='aggregated_results_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parsed_args = vars(_parser.parse_args())
+        aggregate_results_component(**_parsed_args)
+
+    args:
+      - --fid_result
+      - {inputPath: fid_result}
+      - --inception_result
+      - {inputPath: inception_result}
+      - --clip_result
+      - {inputPath: clip_result}
+      - --model_name
+      - {inputValue: model_name}
+      - --output_aggregated_results
+      - {outputPath: aggregated_results}
