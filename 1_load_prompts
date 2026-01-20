@@ -49,8 +49,8 @@ implementation:
         echo "Dependencies installed. Starting component..."
         echo ""
         
-        # Execute Python script
-        exec python3 -u -c "
+        # Execute Python script with arguments passed from Kubeflow
+        python3 -u - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" <<'EOF'
         import os
         import sys
         import json
@@ -279,7 +279,7 @@ implementation:
         
         if __name__ == '__main__':
             main()
-        " "$@"
+        EOF
     args:
       - --input_path
       - {inputValue: input_path}
