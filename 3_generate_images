@@ -91,6 +91,7 @@ implementation:
             import logging
             import numpy as np
             import torch
+            import shutil
             
             logging.basicConfig(
                 level=logging.INFO,
@@ -217,11 +218,18 @@ implementation:
                 
                 logger.info(f'✓ Generated {len(images)} images with shape {images.shape}')
                 
-                # Save images
+                # Save images - np.save adds .npy automatically, then we need to rename
                 logger.info('')
                 logger.info(f'Saving images to {images_output_path}...')
                 np.save(images_output_path, images)
-                logger.info(f'✓ Saved numpy array: {images.shape}')
+                
+                # np.save automatically adds .npy extension, so rename it
+                npy_path = images_output_path + '.npy'
+                if os.path.exists(npy_path) and npy_path != images_output_path:
+                    shutil.move(npy_path, images_output_path)
+                    logger.info(f'✓ Saved numpy array: {images.shape}')
+                else:
+                    logger.info(f'✓ Saved numpy array: {images.shape}')
                 
                 # Save metadata
                 metadata = {
