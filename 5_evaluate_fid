@@ -1,0 +1,270 @@
+name: Evaluate FID Score
+description: Calculate Fréchet Inception Distance between real and generated images. Lower FID indicates better image quality and diversity. Supports automatic image range conversion and Inception normalization.
+
+inputs:
+  - name: real_images
+    type: Data
+    description: 'Numpy file with real images from Load Real Images component'
+  - name: fake_images
+    type: Data
+    description: 'Numpy file with generated images from Generate Images component'
+  - name: model_id
+    type: String
+    description: 'Model identifier for tracking (e.g., "CompVis/stable-diffusion-v1-4")'
+  - name: normalize
+    type: String
+    description: 'Apply Inception normalization: true or false'
+    default: 'true'
+  - name: device
+    type: String
+    description: 'Device: cuda or cpu'
+    default: 'cuda'
+
+outputs:
+  - name: result
+    type: Data
+    description: 'JSON file with FID score and evaluation metadata'
+
+metadata:
+  annotations:
+    author: Evaluate FID Component
+
+implementation:
+  container:
+    image: kushagra4761/nesy-factory-gpu:t2.6v2
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "Installing FID evaluation dependencies..."
+        pip install --no-cache-dir \
+          torchmetrics>=1.0.0 \
+          scipy>=1.10.0 \
+          --break-system-packages > /dev/null 2>&1
+        
+        echo "Dependencies installed. Starting component..."
+        echo ""
+        
+        "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        def _make_parent_dirs_and_return_path(file_path):
+            import os
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            return file_path
+        
+        def evaluate_fid_component(
+            real_images_input_path,
+            fake_images_input_path,
+            model_id,
+            normalize,
+            device,
+            result_output_path,
+        ):
+            import os
+            import sys
+            import json
+            import logging
+            import numpy as np
+            import torch
+            from datetime import datetime
+            
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            logger = logging.getLogger('evaluate_fid')
+            
+            def ensure_directory_exists(file_path):
+                directory = os.path.dirname(file_path)
+                if directory and not os.path.exists(directory):
+                    os.makedirs(directory, exist_ok=True)
+                    logger.info(f'Created directory: {directory}')
+            
+            def calculate_fid(real_imgs, fake_imgs, apply_normalize, dev):
+                """
+                Calculate FID score
+                
+                Args:
+                    real_imgs: numpy array in [0, 1] range
+                    fake_imgs: numpy array in [0, 1] range
+                    apply_normalize: Apply Inception normalization (mean/std)
+                    dev: cuda or cpu
+                
+                Note: 
+                    Images must be in [0, 1] range before calling this function.
+                    The normalize parameter controls Inception-specific normalization.
+                """
+                from torchmetrics.image.fid import FrechetInceptionDistance
+                
+                logger.info('Setting up FID metric')
+                logger.info(f'  Normalize (Inception mean/std): {apply_normalize}')
+                logger.info(f'  Device: {dev}')
+                
+                fid_metric = FrechetInceptionDistance(normalize=apply_normalize).to(dev)
+                
+                # Convert to tensors
+                logger.info('Converting images to tensors...')
+                real_tensor = torch.from_numpy(real_imgs).float()
+                fake_tensor = torch.from_numpy(fake_imgs).float()
+                
+                # Ensure NCHW format
+                if real_tensor.dim() == 4 and real_tensor.shape[-1] in [1, 3]:
+                    real_tensor = real_tensor.permute(0, 3, 1, 2)
+                if fake_tensor.dim() == 4 and fake_tensor.shape[-1] in [1, 3]:
+                    fake_tensor = fake_tensor.permute(0, 3, 1, 2)
+                
+                logger.info(f'  Real tensor: {real_tensor.shape}')
+                logger.info(f'  Fake tensor: {fake_tensor.shape}')
+                
+                # Update metric
+                logger.info('Computing features for real images...')
+                fid_metric.update(real_tensor.to(dev), real=True)
+                
+                logger.info('Computing features for fake images...')
+                fid_metric.update(fake_tensor.to(dev), real=False)
+                
+                # Compute FID
+                logger.info('Computing FID score...')
+                fid_score = float(fid_metric.compute())
+                
+                return fid_score
+            
+            # Parse parameters
+            apply_normalize = normalize.lower() in ['true', '1', 'yes']
+            
+            logger.info('='*80)
+            logger.info('EVALUATE FID SCORE COMPONENT')
+            logger.info('='*80)
+            logger.info(f'Real images: {real_images_input_path}')
+            logger.info(f'Fake images: {fake_images_input_path}')
+            logger.info(f'Model ID: {model_id}')
+            logger.info(f'Normalize: {apply_normalize}')
+            logger.info(f'Device: {device}')
+            logger.info('')
+            
+            try:
+                ensure_directory_exists(result_output_path)
+                
+                # Validate inputs
+                if not os.path.exists(real_images_input_path):
+                    raise FileNotFoundError(f'Real images file not found: {real_images_input_path}')
+                
+                if not os.path.exists(fake_images_input_path):
+                    raise FileNotFoundError(f'Fake images file not found: {fake_images_input_path}')
+                
+                # Load real images
+                logger.info(f'Loading real images from {real_images_input_path}...')
+                real_images = np.load(real_images_input_path)
+                logger.info(f'✓ Loaded {len(real_images)} real images with shape {real_images.shape}')
+                
+                # Convert to [0, 1] range if needed
+                if real_images.max() > 1.0:
+                    real_images = real_images / 255.0
+                    logger.info('  Normalized real images to [0, 1] range')
+                
+                # Load fake images
+                logger.info(f'Loading fake images from {fake_images_input_path}...')
+                fake_images = np.load(fake_images_input_path)
+                logger.info(f'✓ Loaded {len(fake_images)} fake images with shape {fake_images.shape}')
+                
+                # Convert to [0, 1] range if needed
+                if fake_images.max() > 1.0:
+                    fake_images = fake_images / 255.0
+                    logger.info('  Normalized fake images to [0, 1] range')
+                
+                # Validate minimum samples
+                if len(real_images) < 2 or len(fake_images) < 2:
+                    raise ValueError('FID requires at least 2 images in each set')
+                
+                logger.info('')
+                logger.info('Evaluating FID Score...')
+                
+                # Calculate FID
+                fid_score = calculate_fid(real_images, fake_images, apply_normalize, device)
+                
+                logger.info('')
+                logger.info('='*80)
+                logger.info(f'FID Score: {fid_score:.4f}')
+                logger.info('='*80)
+                logger.info('')
+                logger.info('Interpretation (lower is better):')
+                logger.info('  < 10: Excellent quality')
+                logger.info('  10-30: Good quality')
+                logger.info('  30-100: Acceptable')
+                logger.info('  > 100: Poor quality')
+                logger.info('')
+                
+                # Save result
+                result = {
+                    'metric_name': 'fid',
+                    'metric_value': fid_score,
+                    'model_id': model_id,
+                    'num_real_samples': len(real_images),
+                    'num_fake_samples': len(fake_images),
+                    'normalize': apply_normalize,
+                    'timestamp': datetime.now().isoformat(),
+                    'metadata': {
+                        'real_images_shape': list(real_images.shape),
+                        'fake_images_shape': list(fake_images.shape),
+                        'device': device
+                    }
+                }
+                
+                with open(result_output_path, 'w') as f:
+                    json.dump(result, f, indent=2)
+                
+                logger.info(f'✓ Saved result to {result_output_path}')
+                
+                logger.info('')
+                logger.info('='*80)
+                logger.info('FID EVALUATION COMPLETED')
+                logger.info('='*80)
+                logger.info(f'FID Score: {fid_score:.4f}')
+                logger.info(f'Model: {model_id}')
+                logger.info(f'Samples: {len(real_images)} real, {len(fake_images)} fake')
+                logger.info('='*80)
+                
+            except FileNotFoundError as e:
+                logger.error(f'FILE NOT FOUND ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except ValueError as e:
+                logger.error(f'VALIDATION ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except Exception as e:
+                logger.error(f'ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+        
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Evaluate FID Score', description='Calculate Fréchet Inception Distance between real and generated images')
+        _parser.add_argument('--real_images', dest='real_images_input_path', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--fake_images', dest='fake_images_input_path', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--model_id', dest='model_id', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--normalize', dest='normalize', type=str, required=False, default='true')
+        _parser.add_argument('--device', dest='device', type=str, required=False, default='cuda')
+        _parser.add_argument('--output_result', dest='result_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parsed_args = vars(_parser.parse_args())
+        evaluate_fid_component(**_parsed_args)
+
+    args:
+      - --real_images
+      - {inputPath: real_images}
+      - --fake_images
+      - {inputPath: fake_images}
+      - --model_id
+      - {inputValue: model_id}
+      - --normalize
+      - {inputValue: normalize}
+      - --device
+      - {inputValue: device}
+      - --output_result
+      - {outputPath: result}
