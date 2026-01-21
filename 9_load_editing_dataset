@@ -1,0 +1,336 @@
+name: Load Image Editing Dataset
+description: Load image editing datasets from HuggingFace for evaluating image-to-image models. Works with datasets like sayakpaul/instructpix2pix-demo. Extracts original images, captions, edit instructions, and modified captions for benchmarking image editing models.
+
+inputs:
+  - name: dataset_name
+    type: String
+    description: 'HuggingFace dataset name (e.g., "sayakpaul/instructpix2pix-demo")'
+  - name: split
+    type: String
+    description: 'Dataset split: train, test, or validation'
+    default: 'train'
+  - name: max_samples
+    type: String
+    description: 'Maximum samples to load (0 for all)'
+    default: '100'
+  - name: image_size
+    type: String
+    description: 'Target image size as "height,width" (e.g., "512,512")'
+    default: '512,512'
+
+outputs:
+  - name: original_images
+    type: Data
+    description: 'Numpy file with original images before editing'
+  - name: original_captions
+    type: Data
+    description: 'JSON file with original image captions'
+  - name: edit_instructions
+    type: Data
+    description: 'JSON file with edit instructions to apply'
+  - name: modified_captions
+    type: Data
+    description: 'JSON file with expected modified captions after editing'
+  - name: metadata
+    type: Data
+    description: 'JSON file with dataset metadata and sample examples'
+
+metadata:
+  annotations:
+    author: Load Image Editing Dataset Component
+
+implementation:
+  container:
+    image: kushagra4761/nesy-factory-gpu:t2.6v2
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "Installing dataset loading dependencies..."
+        pip install --no-cache-dir \
+          datasets>=2.14.0 \
+          pillow>=10.0.0 \
+          --break-system-packages > /dev/null 2>&1
+        
+        echo "Dependencies installed. Starting component..."
+        echo ""
+        
+        "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        def _make_parent_dirs_and_return_path(file_path):
+            import os
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            return file_path
+        
+        def load_image_editing_dataset_component(
+            dataset_name,
+            split,
+            max_samples,
+            image_size,
+            original_images_output_path,
+            original_captions_output_path,
+            edit_instructions_output_path,
+            modified_captions_output_path,
+            metadata_output_path,
+        ):
+            import os
+            import sys
+            import json
+            import logging
+            import numpy as np
+            import shutil
+            from PIL import Image
+            
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            logger = logging.getLogger('load_editing_dataset')
+            
+            def ensure_directory_exists(file_path):
+                directory = os.path.dirname(file_path)
+                if directory and not os.path.exists(directory):
+                    os.makedirs(directory, exist_ok=True)
+                    logger.info(f'Created directory: {directory}')
+            
+            def load_instructpix2pix_dataset(ds_name, ds_split, max_samp, img_size):
+                # Load InstructPix2Pix dataset from HuggingFace
+                # Dataset format (sayakpaul/instructpix2pix-demo):
+                #   - 'image': original image
+                #   - 'input': original caption
+                #   - 'edit': edit instruction
+                #   - 'output': modified caption
+                # Args:
+                #   ds_name: dataset name on HuggingFace
+                #   ds_split: train, test, or validation
+                #   max_samp: maximum samples to load
+                #   img_size: target image size tuple (width, height)
+                # Returns:
+                #   tuple of (images_array, captions_list, instructions_list, modified_captions_list)
+                from datasets import load_dataset
+                
+                logger.info(f'Loading dataset: {ds_name}')
+                logger.info(f'  Split: {ds_split}')
+                logger.info(f'  Max samples: {max_samp}')
+                
+                dataset = load_dataset(ds_name, split=ds_split)
+                
+                if max_samp > 0:
+                    dataset = dataset.select(range(min(max_samp, len(dataset))))
+                
+                logger.info(f'✓ Loaded {len(dataset)} samples')
+                
+                # Check dataset structure
+                sample = dataset[0]
+                logger.info(f'Dataset fields: {list(sample.keys())}')
+                
+                # Extract components
+                original_images = []
+                original_captions = []
+                edit_instructions = []
+                modified_captions = []
+                
+                logger.info('')
+                logger.info('Processing samples...')
+                for i, item in enumerate(dataset):
+                    # Original image (this is the key field in instructpix2pix-demo)
+                    if 'image' in item:
+                        orig_img = item['image']
+                    elif 'input_image' in item:
+                        orig_img = item['input_image']
+                    elif 'original_image' in item:
+                        orig_img = item['original_image']
+                    else:
+                        logger.warning(f'  No image field in sample {i}, skipping')
+                        continue
+                    
+                    # Original caption
+                    if 'input' in item:
+                        orig_caption = item['input']
+                    elif 'original_caption' in item:
+                        orig_caption = item['original_caption']
+                    elif 'input_prompt' in item:
+                        orig_caption = item['input_prompt']
+                    else:
+                        orig_caption = ''
+                    
+                    # Edit instruction
+                    if 'edit' in item:
+                        edit_inst = item['edit']
+                    elif 'instruction' in item:
+                        edit_inst = item['instruction']
+                    elif 'edit_prompt' in item:
+                        edit_inst = item['edit_prompt']
+                    else:
+                        logger.warning(f'  No edit instruction in sample {i}, skipping')
+                        continue
+                    
+                    # Modified caption (target/expected result)
+                    if 'output' in item:
+                        mod_caption = item['output']
+                    elif 'modified_caption' in item:
+                        mod_caption = item['modified_caption']
+                    elif 'output_prompt' in item:
+                        mod_caption = item['output_prompt']
+                    else:
+                        mod_caption = ''
+                    
+                    # Resize if needed
+                    if orig_img.size != img_size:
+                        orig_img = orig_img.resize(img_size)
+                    
+                    # Convert to numpy
+                    original_images.append(np.array(orig_img.convert('RGB')))
+                    original_captions.append(orig_caption)
+                    edit_instructions.append(edit_inst)
+                    modified_captions.append(mod_caption)
+                    
+                    if (i + 1) % 10 == 0:
+                        logger.info(f'  Processed {i + 1}/{len(dataset)}')
+                
+                logger.info(f'✓ Successfully processed {len(original_images)} samples')
+                
+                return (
+                    np.array(original_images, dtype=np.uint8),
+                    original_captions,
+                    edit_instructions,
+                    modified_captions
+                )
+            
+            # Parse parameters
+            max_samp = int(max_samples)
+            height, width = map(int, image_size.split(','))
+            img_size = (width, height)  # PIL uses (width, height)
+            
+            logger.info('='*80)
+            logger.info('LOAD IMAGE EDITING DATASET COMPONENT')
+            logger.info('='*80)
+            logger.info(f'Dataset: {dataset_name}')
+            logger.info(f'Split: {split}')
+            logger.info(f'Max samples: {max_samp if max_samp > 0 else "all"}')
+            logger.info(f'Image size: {img_size}')
+            logger.info('')
+            
+            try:
+                ensure_directory_exists(original_images_output_path)
+                ensure_directory_exists(original_captions_output_path)
+                ensure_directory_exists(edit_instructions_output_path)
+                ensure_directory_exists(modified_captions_output_path)
+                ensure_directory_exists(metadata_output_path)
+                
+                # Validate dataset name
+                if not dataset_name or dataset_name.strip() == '':
+                    raise ValueError('Dataset name not provided!')
+                
+                # Load dataset
+                logger.info('Loading dataset...')
+                orig_imgs, orig_caps, edit_insts, mod_caps = load_instructpix2pix_dataset(
+                    ds_name=dataset_name,
+                    ds_split=split,
+                    max_samp=max_samp,
+                    img_size=img_size
+                )
+                
+                logger.info('')
+                logger.info('Saving outputs...')
+                
+                # Save original images - handle .npy extension
+                logger.info(f'Saving original images to {original_images_output_path}...')
+                np.save(original_images_output_path, orig_imgs)
+                npy_path = original_images_output_path + '.npy'
+                if os.path.exists(npy_path) and npy_path != original_images_output_path:
+                    shutil.move(npy_path, original_images_output_path)
+                logger.info(f'✓ Original images: {orig_imgs.shape}')
+                
+                # Save original captions
+                with open(original_captions_output_path, 'w') as f:
+                    json.dump({'prompts': orig_caps, 'count': len(orig_caps)}, f, indent=2)
+                logger.info(f'✓ Original captions: {len(orig_caps)} entries')
+                
+                # Save edit instructions
+                with open(edit_instructions_output_path, 'w') as f:
+                    json.dump({'prompts': edit_insts, 'count': len(edit_insts)}, f, indent=2)
+                logger.info(f'✓ Edit instructions: {len(edit_insts)} entries')
+                
+                # Save modified captions
+                with open(modified_captions_output_path, 'w') as f:
+                    json.dump({'prompts': mod_caps, 'count': len(mod_caps)}, f, indent=2)
+                logger.info(f'✓ Modified captions: {len(mod_caps)} entries')
+                
+                # Save metadata
+                metadata = {
+                    'dataset_name': dataset_name,
+                    'split': split,
+                    'num_samples': len(orig_imgs),
+                    'image_size': list(img_size),
+                    'sample_original_caption': orig_caps[0] if orig_caps else None,
+                    'sample_edit_instruction': edit_insts[0] if edit_insts else None,
+                    'sample_modified_caption': mod_caps[0] if mod_caps else None
+                }
+                
+                with open(metadata_output_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                logger.info(f'✓ Metadata saved')
+                
+                logger.info('')
+                logger.info('='*80)
+                logger.info('DATASET LOADING COMPLETED')
+                logger.info('='*80)
+                logger.info(f'Dataset: {dataset_name}')
+                logger.info(f'Samples: {len(orig_imgs)}')
+                logger.info(f'Image shape: {orig_imgs.shape}')
+                logger.info('='*80)
+                logger.info('')
+                logger.info('Next steps:')
+                logger.info('  1. Generate edited images using image editing model')
+                logger.info('  2. Evaluate directional similarity')
+                logger.info('='*80)
+                
+            except ValueError as e:
+                logger.error(f'VALIDATION ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except Exception as e:
+                logger.error(f'ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+        
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Load Image Editing Dataset', description='Load image editing datasets from HuggingFace')
+        _parser.add_argument('--dataset_name', dest='dataset_name', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--split', dest='split', type=str, required=False, default='train')
+        _parser.add_argument('--max_samples', dest='max_samples', type=str, required=False, default='100')
+        _parser.add_argument('--image_size', dest='image_size', type=str, required=False, default='512,512')
+        _parser.add_argument('--output_original_images', dest='original_images_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--output_original_captions', dest='original_captions_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--output_edit_instructions', dest='edit_instructions_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--output_modified_captions', dest='modified_captions_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--output_metadata', dest='metadata_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parsed_args = vars(_parser.parse_args())
+        load_image_editing_dataset_component(**_parsed_args)
+
+    args:
+      - --dataset_name
+      - {inputValue: dataset_name}
+      - --split
+      - {inputValue: split}
+      - --max_samples
+      - {inputValue: max_samples}
+      - --image_size
+      - {inputValue: image_size}
+      - --output_original_images
+      - {outputPath: original_images}
+      - --output_original_captions
+      - {outputPath: original_captions}
+      - --output_edit_instructions
+      - {outputPath: edit_instructions}
+      - --output_modified_captions
+      - {outputPath: modified_captions}
+      - --output_metadata
+      - {outputPath: metadata}
