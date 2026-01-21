@@ -1,0 +1,394 @@
+name: Evaluate CLIP Directional Similarity
+description: Evaluate how well image edits align with text edit instructions using CLIP embeddings. Measures cosine similarity between image direction (edited - original) and text direction (edit instruction - original caption). Used for evaluating image editing models like InstructPix2Pix and ControlNet.
+
+inputs:
+  - name: original_images
+    type: Data
+    description: 'Numpy file with original images before editing'
+  - name: edited_images
+    type: Data
+    description: 'Numpy file with edited images after transformation'
+  - name: original_captions
+    type: Data
+    description: 'JSON file with original image captions'
+  - name: edit_instructions
+    type: Data
+    description: 'JSON file with edit instructions applied'
+  - name: model_id
+    type: String
+    description: 'Model identifier for tracking (e.g., "timbrooks/instruct-pix2pix")'
+  - name: clip_model
+    type: String
+    description: 'CLIP model to use for embeddings'
+    default: 'openai/clip-vit-large-patch14'
+  - name: device
+    type: String
+    description: 'Device: cuda or cpu'
+    default: 'cuda'
+
+outputs:
+  - name: result
+    type: Data
+    description: 'JSON file with directional similarity score and metadata'
+
+metadata:
+  annotations:
+    author: Evaluate CLIP Directional Similarity Component
+
+implementation:
+  container:
+    image: kushagra4761/nesy-factory-gpu:t2.6v2
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "Installing CLIP evaluation dependencies..."
+        pip install --no-cache-dir \
+          transformers>=4.30.0 \
+          pillow>=10.0.0 \
+          --break-system-packages > /dev/null 2>&1
+        
+        echo "Dependencies installed. Starting component..."
+        echo ""
+        
+        "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        def _make_parent_dirs_and_return_path(file_path):
+            import os
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            return file_path
+        
+        def evaluate_clip_directional_similarity_component(
+            original_images_input_path,
+            edited_images_input_path,
+            original_captions_input_path,
+            edit_instructions_input_path,
+            model_id,
+            clip_model,
+            device,
+            result_output_path,
+        ):
+            import os
+            import sys
+            import json
+            import logging
+            import numpy as np
+            import torch
+            import torch.nn.functional as F
+            from datetime import datetime
+            from PIL import Image
+            
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            logger = logging.getLogger('clip_directional_similarity')
+            
+            def ensure_directory_exists(file_path):
+                directory = os.path.dirname(file_path)
+                if directory and not os.path.exists(directory):
+                    os.makedirs(directory, exist_ok=True)
+                    logger.info(f'Created directory: {directory}')
+            
+            def evaluate_directional_similarity(orig_imgs, edit_imgs, orig_caps, edit_insts, clip_mdl_id, dev):
+                # Calculate CLIP Directional Similarity
+                # Measures: cosine_similarity(image_direction, text_direction)
+                #   - image_direction = edited_image_embedding - original_image_embedding
+                #   - text_direction = edit_instruction_embedding - original_caption_embedding
+                # Args:
+                #   orig_imgs: numpy array (N, H, W, C) or list of PIL Images
+                #   edit_imgs: numpy array (N, H, W, C) or list of PIL Images
+                #   orig_caps: list of strings
+                #   edit_insts: list of strings
+                #   clip_mdl_id: CLIP model to use
+                #   dev: cuda or cpu
+                # Returns:
+                #   mean_similarity, std_similarity, all_similarities
+                from transformers import (
+                    CLIPTokenizer,
+                    CLIPTextModelWithProjection,
+                    CLIPVisionModelWithProjection,
+                    CLIPImageProcessor
+                )
+                
+                logger.info(f'Loading CLIP models: {clip_mdl_id}')
+                
+                # Load CLIP components
+                tokenizer = CLIPTokenizer.from_pretrained(clip_mdl_id)
+                text_encoder = CLIPTextModelWithProjection.from_pretrained(clip_mdl_id).to(dev)
+                image_processor = CLIPImageProcessor.from_pretrained(clip_mdl_id)
+                image_encoder = CLIPVisionModelWithProjection.from_pretrained(clip_mdl_id).to(dev)
+                
+                text_encoder.eval()
+                image_encoder.eval()
+                
+                logger.info('✓ CLIP models loaded')
+                
+                # Function to encode images
+                def encode_images(images):
+                    # Encode images to CLIP embeddings
+                    embeddings = []
+                    
+                    for i, img in enumerate(images):
+                        # Convert numpy to PIL if needed
+                        if isinstance(img, np.ndarray):
+                            if img.max() <= 1.0:
+                                img = (img * 255).astype(np.uint8)
+                            img = Image.fromarray(img)
+                        
+                        # Process image
+                        processed = image_processor(images=img, return_tensors='pt')
+                        pixel_values = processed['pixel_values'].to(dev)
+                        
+                        # Encode
+                        with torch.no_grad():
+                            image_embeds = image_encoder(pixel_values=pixel_values).image_embeds
+                        
+                        # Normalize
+                        image_embeds = image_embeds / image_embeds.norm(dim=1, keepdim=True)
+                        embeddings.append(image_embeds)
+                        
+                        if (i + 1) % 10 == 0:
+                            logger.info(f'  Encoded {i + 1}/{len(images)} images')
+                    
+                    return torch.cat(embeddings, dim=0)
+                
+                # Function to encode texts
+                def encode_texts(texts):
+                    # Encode texts to CLIP embeddings
+                    inputs = tokenizer(
+                        texts,
+                        max_length=tokenizer.model_max_length,
+                        padding='max_length',
+                        truncation=True,
+                        return_tensors='pt'
+                    )
+                    
+                    # Move to device
+                    inputs = {k: v.to(dev) for k, v in inputs.items()}
+                    
+                    # Encode
+                    with torch.no_grad():
+                        text_embeds = text_encoder(**inputs).text_embeds
+                    
+                    # Normalize
+                    text_embeds = text_embeds / text_embeds.norm(dim=1, keepdim=True)
+                    
+                    return text_embeds
+                
+                # Encode all inputs
+                logger.info('')
+                logger.info('Encoding images and texts...')
+                logger.info('  Encoding original images...')
+                original_img_embeds = encode_images(orig_imgs)
+                
+                logger.info('  Encoding edited images...')
+                edited_img_embeds = encode_images(edit_imgs)
+                
+                logger.info('  Encoding original captions...')
+                original_text_embeds = encode_texts(orig_caps)
+                
+                logger.info('  Encoding edit instructions...')
+                edit_text_embeds = encode_texts(edit_insts)
+                
+                logger.info('✓ Encoding complete')
+                
+                # Compute directional similarity
+                logger.info('')
+                logger.info('Computing directional similarity...')
+                
+                # Image direction: edited - original
+                image_direction = edited_img_embeds - original_img_embeds
+                
+                # Text direction: edit_instruction - original_caption
+                text_direction = edit_text_embeds - original_text_embeds
+                
+                # Cosine similarity between directions
+                similarities = F.cosine_similarity(image_direction, text_direction, dim=1)
+                
+                # Convert to numpy
+                similarities_np = similarities.cpu().numpy()
+                
+                mean_sim = float(similarities_np.mean())
+                std_sim = float(similarities_np.std())
+                
+                return mean_sim, std_sim, similarities_np
+            
+            logger.info('='*80)
+            logger.info('EVALUATE CLIP DIRECTIONAL SIMILARITY COMPONENT')
+            logger.info('='*80)
+            logger.info(f'Original images: {original_images_input_path}')
+            logger.info(f'Edited images: {edited_images_input_path}')
+            logger.info(f'Original captions: {original_captions_input_path}')
+            logger.info(f'Edit instructions: {edit_instructions_input_path}')
+            logger.info(f'Model ID: {model_id}')
+            logger.info(f'CLIP model: {clip_model}')
+            logger.info(f'Device: {device}')
+            logger.info('')
+            
+            try:
+                ensure_directory_exists(result_output_path)
+                
+                # Validate inputs
+                for path, name in [
+                    (original_images_input_path, 'Original images'),
+                    (edited_images_input_path, 'Edited images'),
+                    (original_captions_input_path, 'Original captions'),
+                    (edit_instructions_input_path, 'Edit instructions')
+                ]:
+                    if not os.path.exists(path):
+                        raise FileNotFoundError(f'{name} not found: {path}')
+                
+                # Load data
+                logger.info('Loading data...')
+                
+                # Load images
+                original_images = np.load(original_images_input_path)
+                edited_images = np.load(edited_images_input_path)
+                logger.info(f'✓ Loaded {len(original_images)} original images: {original_images.shape}')
+                logger.info(f'✓ Loaded {len(edited_images)} edited images: {edited_images.shape}')
+                
+                # Ensure images are in [0, 1] range
+                if original_images.max() > 1.0:
+                    original_images = original_images / 255.0
+                    logger.info('  Normalized original images to [0, 1]')
+                
+                if edited_images.max() > 1.0:
+                    edited_images = edited_images / 255.0
+                    logger.info('  Normalized edited images to [0, 1]')
+                
+                # Load captions
+                with open(original_captions_input_path, 'r') as f:
+                    captions_data = json.load(f)
+                original_captions = captions_data.get('prompts', captions_data)
+                if isinstance(original_captions, dict):
+                    original_captions = list(original_captions.values())
+                logger.info(f'✓ Loaded {len(original_captions)} original captions')
+                
+                # Load edit instructions
+                with open(edit_instructions_input_path, 'r') as f:
+                    instructions_data = json.load(f)
+                edit_instructions = instructions_data.get('prompts', instructions_data)
+                if isinstance(edit_instructions, dict):
+                    edit_instructions = list(edit_instructions.values())
+                logger.info(f'✓ Loaded {len(edit_instructions)} edit instructions')
+                
+                # Validate counts match
+                num_samples = len(original_images)
+                if not (len(edited_images) == len(original_captions) == len(edit_instructions) == num_samples):
+                    raise ValueError(
+                        f'Mismatched counts! '
+                        f'Original images: {len(original_images)}, '
+                        f'Edited images: {len(edited_images)}, '
+                        f'Original captions: {len(original_captions)}, '
+                        f'Edit instructions: {len(edit_instructions)}'
+                    )
+                
+                logger.info('')
+                logger.info('Evaluating directional similarity...')
+                
+                # Evaluate directional similarity
+                mean_sim, std_sim, all_sims = evaluate_directional_similarity(
+                    orig_imgs=original_images,
+                    edit_imgs=edited_images,
+                    orig_caps=original_captions,
+                    edit_insts=edit_instructions,
+                    clip_mdl_id=clip_model,
+                    dev=device
+                )
+                
+                logger.info('')
+                logger.info('='*80)
+                logger.info(f'CLIP Directional Similarity: {mean_sim:.4f} ± {std_sim:.4f}')
+                logger.info('='*80)
+                logger.info('')
+                logger.info('Interpretation:')
+                logger.info('  > 0.15: Excellent alignment')
+                logger.info('  0.10-0.15: Good alignment')
+                logger.info('  0.05-0.10: Acceptable')
+                logger.info('  < 0.05: Poor alignment')
+                logger.info('')
+                logger.info('Reference: InstructPix2Pix on instructpix2pix-demo achieves ~0.08')
+                logger.info('')
+                
+                # Save result
+                result = {
+                    'metric_name': 'clip_directional_similarity',
+                    'metric_value': mean_sim,
+                    'std': std_sim,
+                    'model_id': model_id,
+                    'num_samples': num_samples,
+                    'clip_model': clip_model,
+                    'timestamp': datetime.now().isoformat(),
+                    'metadata': {
+                        'original_images_shape': list(original_images.shape),
+                        'edited_images_shape': list(edited_images.shape),
+                        'device': device,
+                        'all_similarities': all_sims.tolist()
+                    }
+                }
+                
+                with open(result_output_path, 'w') as f:
+                    json.dump(result, f, indent=2)
+                
+                logger.info(f'✓ Saved result to {result_output_path}')
+                
+                logger.info('')
+                logger.info('='*80)
+                logger.info('DIRECTIONAL SIMILARITY EVALUATION COMPLETED')
+                logger.info('='*80)
+                logger.info(f'Score: {mean_sim:.4f} ± {std_sim:.4f}')
+                logger.info(f'Model: {model_id}')
+                logger.info(f'Samples: {num_samples}')
+                logger.info('='*80)
+                
+            except FileNotFoundError as e:
+                logger.error(f'FILE NOT FOUND ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except ValueError as e:
+                logger.error(f'VALIDATION ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except Exception as e:
+                logger.error(f'ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+        
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Evaluate CLIP Directional Similarity', description='Evaluate image edit alignment with text instructions using CLIP')
+        _parser.add_argument('--original_images', dest='original_images_input_path', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--edited_images', dest='edited_images_input_path', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--original_captions', dest='original_captions_input_path', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--edit_instructions', dest='edit_instructions_input_path', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--model_id', dest='model_id', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--clip_model', dest='clip_model', type=str, required=False, default='openai/clip-vit-large-patch14')
+        _parser.add_argument('--device', dest='device', type=str, required=False, default='cuda')
+        _parser.add_argument('--output_result', dest='result_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parsed_args = vars(_parser.parse_args())
+        evaluate_clip_directional_similarity_component(**_parsed_args)
+
+    args:
+      - --original_images
+      - {inputPath: original_images}
+      - --edited_images
+      - {inputPath: edited_images}
+      - --original_captions
+      - {inputPath: original_captions}
+      - --edit_instructions
+      - {inputPath: edit_instructions}
+      - --model_id
+      - {inputValue: model_id}
+      - --clip_model
+      - {inputValue: clip_model}
+      - --device
+      - {inputValue: device}
+      - --output_result
+      - {outputPath: result}
