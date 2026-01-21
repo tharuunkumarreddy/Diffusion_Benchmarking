@@ -1,5 +1,5 @@
-name: Generate Edited Images with InstructPix2Pix
-description: Generate edited images using InstructPix2Pix model. Takes original images and edit instructions, produces edited images with specified transformations. Supports configurable inference steps, guidance scales, and random seed for reproducibility.
+name: Generate Edited Images 
+description: Generate edited images using model. Takes original images and edit instructions, produces edited images with specified transformations. Supports configurable inference steps, guidance scales, and random seed for reproducibility.
 
 inputs:
   - name: original_images
