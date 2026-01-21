@@ -1,0 +1,336 @@
+name: Generate Edited Images with InstructPix2Pix
+description: Generate edited images using InstructPix2Pix model. Takes original images and edit instructions, produces edited images with specified transformations. Supports configurable inference steps, guidance scales, and random seed for reproducibility.
+
+inputs:
+  - name: original_images
+    type: Data
+    description: 'Numpy file with original images from Load Image Editing Dataset component'
+  - name: edit_instructions
+    type: Data
+    description: 'JSON file with edit instructions from Load Image Editing Dataset component'
+  - name: model_id
+    type: String
+    description: 'HuggingFace model ID (e.g., "timbrooks/instruct-pix2pix")'
+    default: 'timbrooks/instruct-pix2pix'
+  - name: num_inference_steps
+    type: String
+    description: 'Number of denoising steps'
+    default: '50'
+  - name: image_guidance_scale
+    type: String
+    description: 'Image guidance scale for conditioning on original image'
+    default: '1.5'
+  - name: guidance_scale
+    type: String
+    description: 'Text guidance scale for edit instruction'
+    default: '7.5'
+  - name: seed
+    type: String
+    description: 'Random seed for reproducibility'
+    default: '0'
+  - name: device
+    type: String
+    description: 'Device: cuda or cpu'
+    default: 'cuda'
+  - name: dtype
+    type: String
+    description: 'Data type: float16 or float32'
+    default: 'float16'
+
+outputs:
+  - name: edited_images
+    type: Data
+    description: 'Numpy file with edited images (.npy format)'
+  - name: metadata
+    type: Data
+    description: 'JSON file with generation metadata and parameters'
+
+metadata:
+  annotations:
+    author: Generate Edited Images Component
+
+implementation:
+  container:
+    image: kushagra4761/nesy-factory-gpu:t2.6v2
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "Installing image editing dependencies..."
+        pip install --no-cache-dir \
+          pillow>=10.0.0 \
+          diffusers>=0.25.0 \
+          safetensors>=0.4.0 \
+          --break-system-packages > /dev/null 2>&1
+        
+        echo "Dependencies installed. Starting component..."
+        echo ""
+        
+        "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        def _make_parent_dirs_and_return_path(file_path):
+            import os
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            return file_path
+        
+        def generate_edited_images_component(
+            original_images_input_path,
+            edit_instructions_input_path,
+            model_id,
+            num_inference_steps,
+            image_guidance_scale,
+            guidance_scale,
+            seed,
+            device,
+            dtype,
+            edited_images_output_path,
+            metadata_output_path,
+        ):
+            import os
+            import sys
+            import json
+            import logging
+            import numpy as np
+            import torch
+            import shutil
+            from PIL import Image
+            from datetime import datetime
+            
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            logger = logging.getLogger('generate_edited_images')
+            
+            def ensure_directory_exists(file_path):
+                directory = os.path.dirname(file_path)
+                if directory and not os.path.exists(directory):
+                    os.makedirs(directory, exist_ok=True)
+                    logger.info(f'Created directory: {directory}')
+            
+            def generate_edits(orig_imgs, edit_insts, mdl_id, dev, dt, seed_val, num_steps, img_guide, txt_guide):
+                # Generate edited images using InstructPix2Pix
+                # Args:
+                #   orig_imgs: numpy array of original images
+                #   edit_insts: list of edit instruction strings
+                #   mdl_id: HuggingFace model ID
+                #   dev: cuda or cpu
+                #   dt: float16 or float32
+                #   seed_val: random seed
+                #   num_steps: number of inference steps
+                #   img_guide: image guidance scale
+                #   txt_guide: text guidance scale
+                # Returns:
+                #   numpy array of edited images
+                from diffusers import StableDiffusionInstructPix2PixPipeline
+                
+                torch_dtype = torch.float16 if dt == 'float16' else torch.float32
+                
+                logger.info(f'Loading InstructPix2Pix pipeline: {mdl_id}')
+                pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+                    mdl_id,
+                    torch_dtype=torch_dtype
+                ).to(dev)
+                
+                if dev == 'cuda':
+                    try:
+                        pipeline.enable_attention_slicing()
+                        logger.info('✓ Enabled attention slicing (memory optimization)')
+                    except:
+                        pass
+                
+                logger.info(f'Generating {len(orig_imgs)} edited images...')
+                generator = torch.manual_seed(seed_val)
+                
+                edited_images = []
+                
+                for i, (img, instruction) in enumerate(zip(orig_imgs, edit_insts)):
+                    # Convert numpy to PIL if needed
+                    if isinstance(img, np.ndarray):
+                        if img.max() <= 1.0:
+                            img = (img * 255).astype(np.uint8)
+                        img = Image.fromarray(img)
+                    
+                    # Generate edited image
+                    result = pipeline(
+                        prompt=instruction,
+                        image=img,
+                        num_inference_steps=num_steps,
+                        image_guidance_scale=img_guide,
+                        guidance_scale=txt_guide,
+                        generator=generator,
+                        output_type='np'
+                    ).images[0]
+                    
+                    edited_images.append(result)
+                    
+                    if (i + 1) % 5 == 0 or i == 0:
+                        logger.info(f'  Generated {i + 1}/{len(orig_imgs)} images')
+                
+                edited_images = np.stack(edited_images, axis=0)
+                logger.info(f'✓ Generated all {len(edited_images)} images')
+                
+                return edited_images
+            
+            # Parse parameters
+            num_steps = int(num_inference_steps)
+            img_guide = float(image_guidance_scale)
+            txt_guide = float(guidance_scale)
+            seed_val = int(seed)
+            
+            logger.info('='*80)
+            logger.info('GENERATE EDITED IMAGES COMPONENT')
+            logger.info('='*80)
+            logger.info(f'Model: {model_id}')
+            logger.info(f'Original images: {original_images_input_path}')
+            logger.info(f'Edit instructions: {edit_instructions_input_path}')
+            logger.info(f'Steps: {num_steps}')
+            logger.info(f'Image guidance: {img_guide}')
+            logger.info(f'Text guidance: {txt_guide}')
+            logger.info(f'Seed: {seed_val}')
+            logger.info(f'Device: {device}')
+            logger.info(f'Dtype: {dtype}')
+            logger.info('')
+            
+            try:
+                ensure_directory_exists(edited_images_output_path)
+                ensure_directory_exists(metadata_output_path)
+                
+                # Validate inputs
+                if not os.path.exists(original_images_input_path):
+                    raise FileNotFoundError(f'Original images file not found: {original_images_input_path}')
+                
+                if not os.path.exists(edit_instructions_input_path):
+                    raise FileNotFoundError(f'Edit instructions file not found: {edit_instructions_input_path}')
+                
+                # Load inputs
+                logger.info('Loading inputs...')
+                original_images = np.load(original_images_input_path)
+                logger.info(f'✓ Loaded {len(original_images)} original images: {original_images.shape}')
+                
+                with open(edit_instructions_input_path, 'r') as f:
+                    instructions_data = json.load(f)
+                edit_instructions = instructions_data.get('prompts', instructions_data)
+                logger.info(f'✓ Loaded {len(edit_instructions)} edit instructions')
+                
+                # Verify counts match
+                if len(original_images) != len(edit_instructions):
+                    raise ValueError(f'Mismatch: {len(original_images)} images vs {len(edit_instructions)} instructions')
+                
+                logger.info('')
+                logger.info('Generating edited images...')
+                
+                # Generate edited images
+                edited_images = generate_edits(
+                    orig_imgs=original_images,
+                    edit_insts=edit_instructions,
+                    mdl_id=model_id,
+                    dev=device,
+                    dt=dtype,
+                    seed_val=seed_val,
+                    num_steps=num_steps,
+                    img_guide=img_guide,
+                    txt_guide=txt_guide
+                )
+                
+                logger.info(f'✓ Generated {len(edited_images)} edited images with shape {edited_images.shape}')
+                
+                # Save edited images - handle .npy extension
+                logger.info('')
+                logger.info(f'Saving edited images to {edited_images_output_path}...')
+                np.save(edited_images_output_path, edited_images)
+                
+                # np.save automatically adds .npy extension, so rename it
+                npy_path = edited_images_output_path + '.npy'
+                if os.path.exists(npy_path) and npy_path != edited_images_output_path:
+                    shutil.move(npy_path, edited_images_output_path)
+                    logger.info(f'✓ Saved numpy array: {edited_images.shape}')
+                else:
+                    logger.info(f'✓ Saved numpy array: {edited_images.shape}')
+                
+                # Save metadata
+                metadata = {
+                    'model_id': model_id,
+                    'num_images': len(edited_images),
+                    'image_shape': list(edited_images.shape),
+                    'num_inference_steps': num_steps,
+                    'image_guidance_scale': img_guide,
+                    'guidance_scale': txt_guide,
+                    'seed': seed_val,
+                    'device': device,
+                    'dtype': dtype,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                with open(metadata_output_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                logger.info(f'✓ Saved metadata to {metadata_output_path}')
+                
+                logger.info('')
+                logger.info('='*80)
+                logger.info('IMAGE EDITING COMPLETED')
+                logger.info('='*80)
+                logger.info(f'Total edited images: {len(edited_images)}')
+                logger.info(f'Shape: {edited_images.shape}')
+                logger.info(f'Model: {model_id}')
+                logger.info('='*80)
+                
+            except FileNotFoundError as e:
+                logger.error(f'FILE NOT FOUND ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except ValueError as e:
+                logger.error(f'VALIDATION ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+            except Exception as e:
+                logger.error(f'ERROR: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
+        
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Generate Edited Images with InstructPix2Pix', description='Generate edited images using InstructPix2Pix model')
+        _parser.add_argument('--original_images', dest='original_images_input_path', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--edit_instructions', dest='edit_instructions_input_path', type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--model_id', dest='model_id', type=str, required=False, default='timbrooks/instruct-pix2pix')
+        _parser.add_argument('--num_inference_steps', dest='num_inference_steps', type=str, required=False, default='50')
+        _parser.add_argument('--image_guidance_scale', dest='image_guidance_scale', type=str, required=False, default='1.5')
+        _parser.add_argument('--guidance_scale', dest='guidance_scale', type=str, required=False, default='7.5')
+        _parser.add_argument('--seed', dest='seed', type=str, required=False, default='0')
+        _parser.add_argument('--device', dest='device', type=str, required=False, default='cuda')
+        _parser.add_argument('--dtype', dest='dtype', type=str, required=False, default='float16')
+        _parser.add_argument('--output_edited_images', dest='edited_images_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument('--output_metadata', dest='metadata_output_path', type=_make_parent_dirs_and_return_path, required=True, default=argparse.SUPPRESS)
+        _parsed_args = vars(_parser.parse_args())
+        generate_edited_images_component(**_parsed_args)
+
+    args:
+      - --original_images
+      - {inputPath: original_images}
+      - --edit_instructions
+      - {inputPath: edit_instructions}
+      - --model_id
+      - {inputValue: model_id}
+      - --num_inference_steps
+      - {inputValue: num_inference_steps}
+      - --image_guidance_scale
+      - {inputValue: image_guidance_scale}
+      - --guidance_scale
+      - {inputValue: guidance_scale}
+      - --seed
+      - {inputValue: seed}
+      - --device
+      - {inputValue: device}
+      - --dtype
+      - {inputValue: dtype}
+      - --output_edited_images
+      - {outputPath: edited_images}
+      - --output_metadata
+      - {outputPath: metadata}
